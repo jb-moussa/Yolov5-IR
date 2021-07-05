@@ -176,7 +176,7 @@ int main()
     std::string input_name = network.getInputsInfo().begin()->first;
 
     input_info->setLayout(Layout::NCHW);
-    input_info->setPrecision(Precision::U8);
+    input_info->setPrecision(Precision::FP32);
     input_info->getPreProcess().setResizeAlgorithm(InferenceEngine::RESIZE_BILINEAR);
     input_info->getPreProcess().setColorFormat(InferenceEngine::ColorFormat::RGB);
 
@@ -203,19 +203,17 @@ int main()
     cv::Mat image;
     camera >> image;
     cv::Mat imageResized;
-    //cv::Mat intermediateImage;
 
     int width = image.size[0];
     int height = image.size[1];
     Blob::Ptr input2 = infer_request.GetBlob(input_name);
-    auto input_data2 = input2->buffer().as<PrecisionTrait<Precision::U8>::value_type *>();
+    auto input_data2 = input2->buffer().as<PrecisionTrait<Precision::FP32>::value_type *>();
     cv::resize(image, imageResized, cv::Size(input_info->getTensorDesc().getDims()[3], input_info->getTensorDesc().getDims()[2]));
     cv::cvtColor(imageResized, imageResized, cv::COLOR_BGR2RGB);
     //Ptr<BackgroundSubtractor> pBackSub;
     //pBackSub = cv::createBackgroundSubtractorMOG2();
     //pBackSub->apply(imageResized, imageResized);
 
-    imageResized = imageResized/255;
 
     size_t channels_number = input2->getTensorDesc().getDims()[1];
     size_t image_size = input2->getTensorDesc().getDims()[3] * input2->getTensorDesc().getDims()[2];
@@ -224,7 +222,7 @@ int main()
     {
         for (size_t ch=0; ch< channels_number; ++ch)
         {
-            input_data2[ch*image_size+pid] = imageResized.at<cv::Vec3b>(pid)[ch];
+            input_data2[ch*image_size+pid] = imageResized.at<cv::Vec3b>(pid)[ch]/255.0f;
         }
     }
 
@@ -246,7 +244,7 @@ int main()
     }
 
     std::vector<BoxResult> boxes;
-    boxes = outputReader(out, 0.0005, 2142000, width, height);
+    boxes = outputReader(out, 0.01, 2142000, width, height);
 
     if (boxes.empty() == false)
     {
@@ -254,13 +252,12 @@ int main()
     std::vector<BoxResult>::iterator obj=boxes.begin();
     for (std::vector<BoxResult>::iterator obj=boxes.begin(); obj!=boxes.end(); ++obj)
     {
-        if ((*obj).getLabel()!= "traffic light" && (*obj).getLabel()!= "kite" && (*obj).getLabel()!= "dining table" )
+        if (/*(*obj).getLabel()== "person" && */(*obj).getLabel()!= "traffic light" && (*obj).getLabel()!= "kite" && (*obj).getLabel()!= "dining table" )
         {
             (*obj).print();
             cv::Point point1 = cv::Point(int(std::min(std::max((*obj).getx1(),1),638)), int(std::min(std::max((*obj).gety1(),1),638)));
             cv::Point point2 = cv::Point(int(std::min(std::max((*obj).getx2(),1),638)), int(std::min(std::max((*obj).gety2(),1),638)));
             cv::rectangle(image, point1, point2, cv::Scalar(0,0,0), 2);
-        
 
             cv::Point point3 = cv::Point(int(std::min(std::max((*obj).getx1()-20,1),638)), int(std::min(std::max((*obj).gety1(),1),638)));
             cv::putText(image, (*obj).getLabel(), point3, cv::FONT_HERSHEY_COMPLEX, 1, cv::Scalar(0,0,0), 2);
