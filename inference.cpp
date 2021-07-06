@@ -1,6 +1,7 @@
 #include <iostream>
 #include <cmath>
 #include <vector>
+#include <array>
 #include <opencv2/opencv.hpp>
 #include "inference_engine.hpp"
 
@@ -44,7 +45,7 @@ class BoxResult
         return label;
     }
 
-    int getConf()
+    float getConf()
     {
         return conf;
     }
@@ -124,6 +125,99 @@ std::vector<BoxResult> outputReader(const float* output, double scoreThresh, int
     return resultsNms;
 }
 
+bool iouMerger (std::vector<BoxResult>::iterator a, std::vector<BoxResult>::iterator b, float iouThresh)
+{
+    if ((*a).gety1() > (*b).gety2() or (*b).gety1()>(*a).gety2() or (*a).getx1() > (*b).getx2() or (*b).getx1() > (*a).getx2())
+    {
+        return false;
+    }
+    float x1inter = std::max((*a).getx1(),(*b).getx1());
+    float x2inter = std::min((*a).getx2(),(*b).getx2());
+    float y1inter = std::max((*a).gety1(),(*b).gety1());
+    float y2inter = std::min((*a).gety2(),(*b).gety2());
+    float areaInter = (x2inter-x1inter)*(y2inter-y1inter);
+    float area1 = ((*a).getx2()-(*a).getx1())*((*a).gety2()-(*a).gety1());
+    float area2 = ((*b).getx2()-(*b).getx1())*((*b).gety2()-(*b).gety1());
+    if (area1+area2-areaInter!=0 && (areaInter/(area1+area2-areaInter)) > iouThresh)
+    {
+        return true;
+    }
+    return false;
+}
+
+std::vector<BoxResult> mergeDoublons (std::vector<BoxResult> res, float iouThresh)
+{
+    std::vector<BoxResult> newRes;
+    int len = res.size();
+    int group = 0;
+    for (std::vector<BoxResult>::iterator obj=res.begin(); obj != res.end(); ++obj)
+    {
+        if ((*obj).getGroup()==0)
+        {
+            group++;
+            (*obj).setGroup(group);
+            for (std::vector<BoxResult>::iterator doub = (obj+1); doub != res.end(); ++doub)
+            {
+                if ((*obj).getLabel() == (*doub).getLabel() && iouMerger(obj, doub, iouThresh))
+                {
+                    (*doub).setGroup(group);
+                }
+                
+            }
+        }
+    }
+    std::vector<std::vector<BoxResult>> resInter;
+    for (int i=0; i<group; i++)
+    {
+        std::vector<BoxResult> box;
+        resInter.push_back(box);
+    }
+
+    for (std::vector<BoxResult>::iterator obj=res.begin(); obj != res.end(); ++obj)
+    {
+        resInter[(*obj).getGroup()-1].push_back(*obj);
+    }
+
+    for (int grp=0; grp<group-1; grp++)
+    {
+        float x1(0);
+        float x2(0);
+        float y1(0);
+        float y2(0);
+        int compt(0);
+        float conf(0);
+
+        for (std::vector<BoxResult>::iterator obj=resInter[grp].begin(); obj != resInter[grp].end(); ++obj)
+        {
+            compt++;
+            float temporaryConf((*obj).getConf());
+            x1+=(*obj).getx1()*temporaryConf;
+            x2+=(*obj).getx2()*temporaryConf;
+            y1+=(*obj).gety1()*temporaryConf;
+            y2+=(*obj).gety2()*temporaryConf;
+            conf+= temporaryConf;
+        }
+
+        BoxResult newBox = BoxResult(conf, (*resInter[grp].begin()).getLabel(), x1/conf, y1/conf, x2/conf, y2/conf);
+        newRes.push_back(newBox);
+    }
+    return newRes;
+    
+}
+
+std::vector<BoxResult> deleteLowConfidence (std::vector<BoxResult> boxes, float thresh)
+{
+    std::vector<BoxResult> newBoxes;
+    for (std::vector<BoxResult>::iterator obj=boxes.begin(); obj != boxes.end(); ++obj)
+    {
+        if ((*obj).getConf()>thresh)
+        {
+            newBoxes.push_back(*obj);
+        }
+    }
+    return newBoxes;
+}
+
 std::vector<BoxResult> merge_vector(std::vector<BoxResult> linkedList1, std::vector<BoxResult> linkedList2)
 {
     std::vector<BoxResult> res ;
@@ -188,18 +282,17 @@ int main()
     for (auto &item : output_info) {
         auto output_data = item.second;
         output_data->setPrecision(InferenceEngine::Precision::FP32);
-        //output_data->setLayout(InferenceEngine::Layout::NC);
     }
 
 
     executableNetwork = core.LoadNetwork(network, "MYRIAD");
 
     
-    while(true)
-    {
+    
     InferRequest infer_request = executableNetwork.CreateInferRequest();
 
-
+    while (true)
+    {
     cv::Mat image;
     camera >> image;
     cv::Mat imageResized;
@@ -210,10 +303,7 @@ int main()
     auto input_data2 = input2->buffer().as<PrecisionTrait<Precision::FP32>::value_type *>();
     cv::resize(image, imageResized, cv::Size(input_info->getTensorDesc().getDims()[3], input_info->getTensorDesc().getDims()[2]));
     cv::cvtColor(imageResized, imageResized, cv::COLOR_BGR2RGB);
-    //Ptr<BackgroundSubtractor> pBackSub;
-    //pBackSub = cv::createBackgroundSubtractorMOG2();
-    //pBackSub->apply(imageResized, imageResized);
-
+    
 
     size_t channels_number = input2->getTensorDesc().getDims()[1];
     size_t image_size = input2->getTensorDesc().getDims()[3] * input2->getTensorDesc().getDims()[2];
@@ -244,24 +334,27 @@ int main()
     }
 
     std::vector<BoxResult> boxes;
-    boxes = outputReader(out, 0.01, 2142000, width, height);
+
+    boxes = outputReader(out, 0.0001, 2142000, width, height);
 
     if (boxes.empty() == false)
     {
     boxes = sortConf(boxes.begin() , boxes.size());
+    boxes = mergeDoublons(boxes, 0.5);
+    boxes = deleteLowConfidence(boxes, 0.05f);
+
+
     std::vector<BoxResult>::iterator obj=boxes.begin();
     for (std::vector<BoxResult>::iterator obj=boxes.begin(); obj!=boxes.end(); ++obj)
     {
-        if (/*(*obj).getLabel()== "person" && */(*obj).getLabel()!= "traffic light" && (*obj).getLabel()!= "kite" && (*obj).getLabel()!= "dining table" )
-        {
-            (*obj).print();
-            cv::Point point1 = cv::Point(int(std::min(std::max((*obj).getx1(),1),638)), int(std::min(std::max((*obj).gety1(),1),638)));
-            cv::Point point2 = cv::Point(int(std::min(std::max((*obj).getx2(),1),638)), int(std::min(std::max((*obj).gety2(),1),638)));
-            cv::rectangle(image, point1, point2, cv::Scalar(0,0,0), 2);
+        (*obj).print();
+        cv::Point point1 = cv::Point(int(std::min(std::max((*obj).getx1(),1),638)), int(std::min(std::max((*obj).gety1(),1),638)));
+        cv::Point point2 = cv::Point(int(std::min(std::max((*obj).getx2(),1),638)), int(std::min(std::max((*obj).gety2(),1),638)));
+        cv::rectangle(image, point1, point2, cv::Scalar(0,0,0), 2);
 
-            cv::Point point3 = cv::Point(int(std::min(std::max((*obj).getx1()-20,1),638)), int(std::min(std::max((*obj).gety1(),1),638)));
-            cv::putText(image, (*obj).getLabel(), point3, cv::FONT_HERSHEY_COMPLEX, 1, cv::Scalar(0,0,0), 2);
-        }
+        cv::Point point3 = cv::Point(int(std::min(std::max((*obj).getx1()-20,1),638)), int(std::min(std::max((*obj).gety1(),1),638)));
+        std::string txt = (*obj).getLabel() + " : " + std::to_string((*obj).getConf());
+        cv::putText(image, txt, point3, cv::FONT_HERSHEY_COMPLEX, 1, cv::Scalar(0,0,0), 2);
     }
     }
 
@@ -283,7 +376,8 @@ int main()
 
     cv::imshow("Display", image);
     cv::waitKey(2);
-
     }
+
+    
     return 0;
 }
